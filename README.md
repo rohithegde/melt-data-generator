@@ -184,4 +184,4 @@ This data generator is designed for:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is released into the public domain under the Unlicense - see the [LICENSE](LICENSE) file for details. You can use it however you want without any restrictions or attribution requirements.
