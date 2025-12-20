@@ -448,20 +448,58 @@ class MELTGenerator:
                 "message": "Scheduled maintenance window completed"
             })
         
-        # Scaling Events (Auto-scaling based on load)
-        if random.random() < 0.02:  # ~2% chance per interval
-            service = random.choice(SERVICES)
-            action = random.choice(["SCALE_UP", "SCALE_DOWN", "SCALE_UP"])
-            events_batch.append({
+        # Scaling Events (Auto-scaling based on load - more likely during incidents)
+        scale_prob = 0.02  # Base probability
+        
+        # Increase scaling probability during incidents (to handle load)
+        if active_incidents:
+            scale_prob = 0.05  # Higher during incidents
+        
+        if random.random() < scale_prob:
+            # Prefer services affected by incidents for scale-up
+            affected_services = []
+            for incident in active_incidents:
+                affected_services.extend(incident.get('affected_services', []))
+            
+            if affected_services and random.random() < 0.6:  # 60% chance to scale affected service
+                service = random.choice(affected_services)
+                action = "SCALE_UP"  # Always scale up during incidents
+                incident = next((inc for inc in active_incidents if service in inc.get('affected_services', [])), None)
+            else:
+                service = random.choice(SERVICES)
+                action = random.choice(["SCALE_UP", "SCALE_DOWN", "SCALE_UP"])
+                incident = None
+            
+            # Determine trigger based on incident type if applicable
+            if incident:
+                if incident['type'] == "CPU_SATURATION":
+                    trigger = "CPU threshold"
+                elif incident['type'] == "MEMORY_LEAK":
+                    trigger = "Memory threshold"
+                elif incident['type'] in ["DB_CONTENTION", "RESOURCE_EXHAUSTION"]:
+                    trigger = "Request rate"
+                else:
+                    trigger = "Latency threshold"
+            else:
+                trigger = random.choice(["CPU threshold", "Memory threshold", "Request rate", "Latency threshold"])
+            
+            scale_event = {
                 "timestamp": timestamp.isoformat(),
                 "type": "AUTOSCALE",
                 "service": service,
                 "action": action,
                 "current_replicas": random.randint(2, 8),
                 "new_replicas": random.randint(3, 10) if action == "SCALE_UP" else random.randint(1, 5),
-                "trigger": random.choice(["CPU threshold", "Memory threshold", "Request rate", "Latency threshold"]),
+                "trigger": trigger,
                 "message": f"Auto-scaling {service}: {action}"
-            })
+            }
+            
+            # Link to incident if applicable
+            if incident:
+                scale_event["incident_id"] = incident['id']
+                scale_event["incident_type"] = incident['type']
+            
+            events_batch.append(scale_event)
         
         # Configuration Change Events
         if random.random() < 0.01:  # ~1% chance per interval
@@ -478,28 +516,74 @@ class MELTGenerator:
                 "message": f"Configuration change: {config_type} updated for {service}"
             })
         
-        # Health Check Events (Periodic)
+        # Health Check Events (Periodic) - Correlated with incidents
         if timestamp.minute % 30 == 0:  # Every 30 minutes
             for service in random.sample(SERVICES, k=random.randint(1, 3)):
-                health_status = random.choice(["HEALTHY", "HEALTHY", "HEALTHY", "DEGRADED"])
-                events_batch.append({
+                # Check if this service is affected by any active incident
+                service_incidents = [inc for inc in active_incidents if service in inc.get('affected_services', [])]
+                
+                if service_incidents:
+                    # Service has active incidents - health check should reflect degradation
+                    incident = service_incidents[0]
+                    health_status = random.choice(["DEGRADED", "DEGRADED", "UNHEALTHY"])
+                    liveness = "FAIL" if random.random() < 0.7 else "PASS"
+                    readiness = "FAIL" if random.random() < 0.6 else "PASS"
+                else:
+                    # Normal operation - mostly healthy
+                    health_status = random.choice(["HEALTHY", "HEALTHY", "HEALTHY", "DEGRADED"])
+                    liveness = "PASS" if health_status == "HEALTHY" else random.choice(["PASS", "FAIL"])
+                    readiness = "PASS" if health_status == "HEALTHY" else random.choice(["PASS", "FAIL"])
+                
+                health_event = {
                     "timestamp": timestamp.isoformat(),
                     "type": "HEALTH_CHECK",
                     "service": service,
                     "status": health_status,
                     "checks": {
-                        "liveness": "PASS" if health_status == "HEALTHY" else random.choice(["PASS", "FAIL"]),
-                        "readiness": "PASS" if health_status == "HEALTHY" else random.choice(["PASS", "FAIL"]),
+                        "liveness": liveness,
+                        "readiness": readiness,
                         "startup": "PASS"
                     },
                     "message": f"Health check for {service}: {health_status}"
-                })
+                }
+                
+                # Link to incident if service is affected
+                if service_incidents:
+                    health_event["incident_id"] = service_incidents[0]['id']
+                    health_event["incident_type"] = service_incidents[0]['type']
+                
+                events_batch.append(health_event)
         
-        # Service Restart Events (Occasional)
-        if random.random() < 0.003:  # ~0.3% chance per interval
-            node = random.choice(self.topology)
-            reason = random.choice(["OOM kill", "Crash loop", "Manual restart", "Pod eviction", "Node maintenance"])
-            events_batch.append({
+        # Service Restart Events (Correlated with incidents)
+        # Higher probability during incidents, especially memory leaks
+        restart_prob = 0.003  # Base probability
+        restart_reasons = ["OOM kill", "Crash loop", "Manual restart", "Pod eviction", "Node maintenance"]
+        
+        # Check if any incidents are active that might cause restarts
+        for incident in active_incidents:
+            if incident['type'] == "MEMORY_LEAK":
+                restart_prob = 0.02  # Much higher during memory leaks
+                restart_reasons = ["OOM kill", "OOM kill", "Crash loop", "Manual restart"]
+            elif incident['type'] in ["CPU_SATURATION", "RESOURCE_EXHAUSTION"]:
+                restart_prob = 0.01  # Higher during resource issues
+                restart_reasons = ["Crash loop", "OOM kill", "Manual restart"]
+        
+        if random.random() < restart_prob:
+            # Prefer hosts affected by incidents
+            affected_hosts = []
+            for incident in active_incidents:
+                affected_hosts.extend(incident.get('affected_hosts', []))
+            
+            if affected_hosts and random.random() < 0.7:  # 70% chance to restart affected host
+                host_id = random.choice(affected_hosts)
+                node = next((n for n in self.topology if n['host_id'] == host_id), random.choice(self.topology))
+                incident = next((inc for inc in active_incidents if host_id in inc.get('affected_hosts', [])), None)
+            else:
+                node = random.choice(self.topology)
+                incident = None
+            
+            reason = random.choice(restart_reasons)
+            restart_event = {
                 "timestamp": timestamp.isoformat(),
                 "type": "SERVICE_RESTART",
                 "service": node['service'],
@@ -508,7 +592,14 @@ class MELTGenerator:
                 "reason": reason,
                 "restart_count": random.randint(1, 5),
                 "message": f"Service restart: {node['service']} on {node['host_id']} - {reason}"
-            })
+            }
+            
+            # Link to incident if applicable
+            if incident:
+                restart_event["incident_id"] = incident['id']
+                restart_event["incident_type"] = incident['type']
+            
+            events_batch.append(restart_event)
         
         # Incident Events (Enhanced with intermediate events)
         for incident in active_incidents:
@@ -602,23 +693,51 @@ class MELTGenerator:
                     }
                 })
         
-        # User Action Events (Manual interventions)
-        if random.random() < 0.005:  # ~0.5% chance per interval
-            action_type = random.choice(["MANUAL_ROLLBACK", "FORCE_RESTART", "TRAFFIC_SHIFT", "FEATURE_TOGGLE"])
-            service = random.choice(SERVICES)
-            events_batch.append({
+        # User Action Events (Manual interventions - more likely during incidents)
+        user_action_prob = 0.005  # Base probability
+        
+        # Increase probability during active incidents (engineers taking action)
+        if active_incidents:
+            user_action_prob = 0.015  # 3x higher during incidents
+        
+        if random.random() < user_action_prob:
+            # Prefer services affected by incidents
+            affected_services = []
+            for incident in active_incidents:
+                affected_services.extend(incident.get('affected_services', []))
+            
+            if affected_services and random.random() < 0.7:  # 70% chance to act on affected service
+                service = random.choice(affected_services)
+                incident = next((inc for inc in active_incidents if service in inc.get('affected_services', [])), None)
+                # During incidents, prefer mitigation actions
+                action_type = random.choice(["FORCE_RESTART", "TRAFFIC_SHIFT", "MANUAL_ROLLBACK", "FEATURE_TOGGLE"])
+                reason = random.choice(["Error spike", "Performance issue", "Customer report"])
+            else:
+                service = random.choice(SERVICES)
+                incident = None
+                action_type = random.choice(["MANUAL_ROLLBACK", "FORCE_RESTART", "TRAFFIC_SHIFT", "FEATURE_TOGGLE"])
+                reason = random.choice(["Performance issue", "Error spike", "Customer report", "Preventive action"])
+            
+            user_action_event = {
                 "timestamp": timestamp.isoformat(),
                 "type": "USER_ACTION",
                 "action": action_type,
                 "service": service,
                 "user": f"user-{random.choice(['alice', 'bob', 'charlie', 'diana'])}",
-                "reason": random.choice(["Performance issue", "Error spike", "Customer report", "Preventive action"]),
+                "reason": reason,
                 "message": f"Manual action: {action_type} on {service}",
                 "metadata": {
                     "action_id": str(uuid.uuid4()),
                     "approved_by": f"manager-{random.choice(['alice', 'bob'])}"
                 }
-            })
+            }
+            
+            # Link to incident if applicable
+            if incident:
+                user_action_event["incident_id"] = incident['id']
+                user_action_event["incident_type"] = incident['type']
+            
+            events_batch.append(user_action_event)
         
         return events_batch
     
