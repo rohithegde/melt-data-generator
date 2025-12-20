@@ -169,8 +169,13 @@ Completed 2024-06-02 (0.5%) - 0 primary incident(s)
 
 - Generates data day-by-day to minimize memory usage
 - Progress tracking every 100 intervals
-- Estimated generation time: ~2-4 hours for full year (depending on system)
-- Output size: ~5-10 GB for full year (compressed JSON)
+- Generation time: ~30-60 seconds for full year (365 days) with 15-minute granularity
+- Output size: ~800 MB for full year (uncompressed JSON)
+  - Metrics: ~300 MB
+  - Traces: ~280 MB
+  - Logs: ~195 MB
+  - Events: ~10 MB
+  - Metadata: <1 MB
 
 ## Use Cases
 
