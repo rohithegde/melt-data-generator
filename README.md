@@ -53,7 +53,7 @@ The generator will:
 
 ### Configuration
 
-You can modify the following constants in `data_generator.py`:
+You can modify the following constants in `generate_melt_data.py`:
 
 - `DAYS_TO_GENERATE`: Number of days to generate (default: 365)
 - `GRANULARITY_MINUTES`: Time interval between data points (default: 15)
