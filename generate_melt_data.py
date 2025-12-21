@@ -840,12 +840,106 @@ class MELTGenerator:
         with open(os.path.join(BASE_DIR, 'metadata', 'incident_catalog.json'), 'w') as f:
             json.dump(ground_truth_enhanced, f, default=str, indent=2)
         
+        # Generate Root Cause Analysis Summary
+        primary_incidents = [inc for inc in ground_truth_catalog if inc.get('is_primary', True)]
+        cascading_incidents = [inc for inc in ground_truth_catalog if not inc.get('is_primary', True)]
+        
+        # Group primary incidents by type
+        root_causes_by_type = {}
+        for incident in primary_incidents:
+            inc_type = incident['type']
+            if inc_type not in root_causes_by_type:
+                root_causes_by_type[inc_type] = []
+            root_causes_by_type[inc_type].append(incident)
+        
+        # Build mapping of primary incident to cascading incidents
+        incident_map = {inc['id']: inc for inc in ground_truth_catalog}
+        
+        # Write detailed root cause analysis to file
+        root_cause_file = os.path.join(BASE_DIR, 'metadata', 'root_cause.txt')
+        with open(root_cause_file, 'w') as f:
+            f.write("=" * 80 + "\n")
+            f.write("ROOT CAUSE ANALYSIS DETAILS\n")
+            f.write("=" * 80 + "\n")
+            f.write("\n")
+            f.write("This file contains detailed information about all root causes and their\n")
+            f.write("resultant cascading incidents. Use this to verify if your RCA model\n")
+            f.write("correctly identifies root causes.\n")
+            f.write("\n")
+            
+            # Write root causes grouped by type
+            for root_cause_type in sorted(root_causes_by_type.keys()):
+                incidents_of_type = root_causes_by_type[root_cause_type]
+                f.write(f"\n{'─' * 80}\n")
+                f.write(f"ROOT CAUSE TYPE: {root_cause_type} ({len(incidents_of_type)} occurrence(s))\n")
+                f.write(f"  Metric: {INCIDENT_TYPES[root_cause_type]['metric']}\n")
+                f.write(f"  Severity: {INCIDENT_TYPES[root_cause_type]['severity']}\n")
+                f.write(f"  Cascading Probability: {INCIDENT_TYPES[root_cause_type]['cascading_prob'] * 100:.0f}%\n")
+                f.write(f"{'─' * 80}\n")
+                
+                for idx, primary_incident in enumerate(incidents_of_type, 1):
+                    start_time = primary_incident['start_time']
+                    end_time = primary_incident['end_time']
+                    duration = (end_time - start_time).total_seconds() / 60
+                    
+                    f.write(f"\n  [{idx}] Primary Incident ID: {primary_incident['id']}\n")
+                    f.write(f"      Service: {primary_incident['target_service']}\n")
+                    f.write(f"      Host: {primary_incident['target_host']}\n")
+                    f.write(f"      Time: {start_time.strftime('%Y-%m-%d %H:%M')} - {end_time.strftime('%H:%M')} ({duration:.0f} min)\n")
+                    f.write(f"      Affected Services: {', '.join(primary_incident.get('affected_services', []))}\n")
+                    f.write(f"      Affected Hosts: {len(primary_incident.get('affected_hosts', []))} host(s)\n")
+                    
+                    # Show cascading incidents
+                    cascading_ids = primary_incident.get('cascading_incidents', [])
+                    if cascading_ids:
+                        f.write(f"      └─ Cascading Incidents ({len(cascading_ids)}):\n")
+                        for cascade_id in cascading_ids:
+                            if cascade_id in incident_map:
+                                cascade = incident_map[cascade_id]
+                                cascade_start = cascade['start_time']
+                                cascade_duration = (cascade['end_time'] - cascade_start).total_seconds() / 60
+                                f.write(f"         • {cascade['target_service']} ({cascade['type']})\n")
+                                f.write(f"           ID: {cascade_id}\n")
+                                f.write(f"           Time: {cascade_start.strftime('%H:%M')} - {cascade['end_time'].strftime('%H:%M')} ({cascade_duration:.0f} min)\n")
+                    else:
+                        f.write(f"      └─ No cascading incidents\n")
+            
+            f.write("\n")
+            f.write("=" * 80 + "\n")
+            f.write("SUMMARY BY ROOT CAUSE TYPE\n")
+            f.write("=" * 80 + "\n")
+            for root_cause_type in sorted(root_causes_by_type.keys()):
+                count = len(root_causes_by_type[root_cause_type])
+                total_cascading = sum(
+                    len(inc.get('cascading_incidents', [])) 
+                    for inc in root_causes_by_type[root_cause_type]
+                )
+                f.write(f"  {root_cause_type:30s}: {count:3d} root cause(s) → {total_cascading:3d} cascading incident(s)\n")
+            
+            f.write("\n")
+            f.write("=" * 80 + "\n")
+        
         print("-" * 60)
         print(f"Generation complete!")
         print(f"Total incidents: {ground_truth_enhanced['summary']['total_incidents']}")
         print(f"Primary incidents: {ground_truth_enhanced['summary']['primary_incidents']}")
         print(f"Cascading incidents: {ground_truth_enhanced['summary']['cascading_incidents']}")
         print(f"Data saved to: {BASE_DIR}/")
+        print()
+        print("=" * 80)
+        print("ROOT CAUSE ANALYSIS SUMMARY")
+        print("=" * 80)
+        print()
+        for root_cause_type in sorted(root_causes_by_type.keys()):
+            count = len(root_causes_by_type[root_cause_type])
+            total_cascading = sum(
+                len(inc.get('cascading_incidents', [])) 
+                for inc in root_causes_by_type[root_cause_type]
+            )
+            print(f"  {root_cause_type:30s}: {count:3d} root cause(s) → {total_cascading:3d} cascading incident(s)")
+        print()
+        print(f"Detailed root cause analysis saved to: {root_cause_file}")
+        print("=" * 80)
 
     def _save_file(self, data, dtype, month, date_str):
         path = os.path.join(BASE_DIR, dtype, month, f"{dtype}_{date_str}.json")
