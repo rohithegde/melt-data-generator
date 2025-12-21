@@ -24,7 +24,7 @@ A comprehensive data generator for creating realistic MELT (Metrics, Events, Log
 - **Multi-Service Support**: Service dependency graph with cascading incident propagation
 - **Enhanced Ground Truth**: Complete incident catalog with relationships and metadata
 
-## Installation
+## Installationg
 
 1. Ensure you have Python 3.8 or higher installed
 2. Install dependencies:
@@ -46,7 +46,7 @@ python generate_melt_data.py
 The generator will:
 
 - Create a `melt_data/` directory structure
-- Generate data for 365 days starting from June 1, 2024
+- Generate data for 365 days starting from June 1, 2024(configurable)
 - Save data in daily JSON files organized by month
 - Display progress as it generates data
 - Create a ground truth catalog with all incidents
@@ -67,54 +67,11 @@ The generator supports multiple cloud providers. All configuration is done via `
 
 Create or edit `config.json` to configure generation settings, enable/disable clouds, and configure regions:
 
-```json
-{
-  "generation": {
-    "start_date": "2024-06-01",
-    "days_to_generate": 365,
-    "granularity_minutes": 15
-  },
-  "clouds": {
-    "aws": {
-      "enabled": false,
-      "regions": ["us-east-1", "eu-west-1"]
-    },
-    "azure": {
-      "enabled": false,
-      "regions": ["eastus"]
-    },
-    "gcp": {
-      "enabled": false,
-      "regions": ["us-east1"]
-    },
-    "openstack": {
-      "enabled": false,
-      "regions": ["region-one"]
-    },
-    "nutanix": {
-      "enabled": false,
-      "regions": ["cluster-1"]
-    },
-    "vmware": {
-      "enabled": false,
-      "regions": ["datacenter-1"]
-    },
-    "onpremise": {
-      "enabled": true,
-      "regions": ["on-prem-dc1"]
-    }
-  }
-}
-```
-
 **Using Command-Line Arguments:**
 
 ```bash
 # Use default config.json
 python generate_melt_data.py
-
-# Use custom config file
-python generate_melt_data.py --config my_config.json
 ```
 
 All configuration comes from config.json. The only CLI argument is `--config` to specify a different config file.
