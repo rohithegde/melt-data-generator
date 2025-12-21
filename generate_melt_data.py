@@ -2,18 +2,17 @@ import os
 import json
 import uuid
 import random
+import argparse
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
+from cloud_providers import CloudProviderFactory, CloudConfig
 
 # --- CONFIGURATION ---
+# Note: START_DATE, DAYS_TO_GENERATE, and GRANULARITY_MINUTES are now loaded from config.json
 BASE_DIR = "melt_data"
-START_DATE = datetime(2024, 6, 1)
-DAYS_TO_GENERATE = 365  # Full year of data
-GRANULARITY_MINUTES = 15  # 15-minute intervals for higher resolution
 
-# Topology Simulation
-REGIONS = ["us-east-1", "eu-west-1", "on-prem-dc1"]
+# Topology Simulation (REGIONS now comes from cloud config)
 SERVICES = ["web-frontend", "auth-service", "payment-gateway", "inventory-db", "recommendation-engine"]
 HOSTS_PER_SERVICE = 5
 
@@ -39,7 +38,21 @@ INCIDENT_TYPES = {
 }
 
 class MELTGenerator:
-    def __init__(self):
+    def __init__(self, cloud_config: CloudConfig = None):
+        """Initialize MELT generator with cloud configuration.
+        
+        Args:
+            cloud_config: CloudConfig instance. If None, creates default config with onpremise enabled.
+        """
+        if cloud_config is None:
+            cloud_config = CloudConfig()
+            # Default to onpremise if no config
+            if not cloud_config.get_enabled_clouds():
+                cloud_config.enable_cloud("onpremise")
+        
+        self.cloud_config = cloud_config
+        self.providers = CloudProviderFactory.create_providers_from_config(cloud_config)
+        self.regions = cloud_config.get_all_regions()
         self.topology = self._build_topology()
         self.incidents = []
         self._prepare_directories()
@@ -71,14 +84,32 @@ class MELTGenerator:
             os.makedirs(os.path.join(BASE_DIR, dtype), exist_ok=True)
 
     def _build_topology(self):
+        """Build topology using cloud providers for host IDs and regions."""
         topology = []
         for svc in SERVICES:
             for i in range(HOSTS_PER_SERVICE):
+                # Select a random region from enabled clouds
+                region = random.choice(self.regions)
+                
+                # Get the provider for this region
+                provider = CloudProviderFactory.get_provider_for_region(region, self.cloud_config)
+                if provider is None:
+                    # Fallback to first available provider
+                    provider = list(self.providers.values())[0]
+                
+                # Generate cloud-specific host ID
+                host_id = provider.generate_host_id(svc, i, region)
+                
+                # Generate cloud-specific metadata
+                metadata = provider.generate_metadata(host_id, svc, region)
+                
                 topology.append({
-                    "host_id": f"{svc}-{uuid.uuid4().hex[:6]}",
+                    "host_id": host_id,
                     "service": svc,
-                    "region": random.choice(REGIONS),
-                    "ip": f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}"
+                    "region": region,
+                    "cloud_provider": provider.get_provider_name(),
+                    "ip": f"10.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(0,255)}",
+                    **metadata
                 })
         return topology
 
@@ -109,10 +140,25 @@ class MELTGenerator:
             # Select target based on incident type
             if incident_type == "NETWORK_PARTITION":
                 # Regional incident affects all services in a region
-                target_region = random.choice(REGIONS)
-                affected_hosts = self.region_to_hosts[target_region]
-                primary_host = random.choice(affected_hosts)
-                primary_service = next(n['service'] for n in self.topology if n['host_id'] == primary_host)
+                # Choose from regions that actually have hosts
+                available_regions = list(self.region_to_hosts.keys())
+                if not available_regions:
+                    # Fallback: just pick a random region from config
+                    target_region = random.choice(self.regions)
+                    # Create empty list for affected hosts (will be populated below)
+                    affected_hosts = []
+                else:
+                    target_region = random.choice(available_regions)
+                    affected_hosts = self.region_to_hosts[target_region]
+                
+                if affected_hosts:
+                    primary_host = random.choice(affected_hosts)
+                    primary_service = next(n['service'] for n in self.topology if n['host_id'] == primary_host)
+                else:
+                    # Fallback: pick any host from topology
+                    target = random.choice(self.topology)
+                    primary_host = target['host_id']
+                    primary_service = target['service']
             elif incident_type == "RESOURCE_EXHAUSTION":
                 # Affects all services using a shared resource (e.g., database)
                 primary_service = "inventory-db"
@@ -174,7 +220,12 @@ class MELTGenerator:
             
             # Handle regional incidents
             if incident_type == "NETWORK_PARTITION":
-                primary_incident['affected_hosts'] = self.region_to_hosts[target_region]
+                # Get all hosts in the target region
+                region_hosts = self.region_to_hosts.get(target_region, [])
+                if not region_hosts:
+                    # Fallback: get hosts by filtering topology
+                    region_hosts = [n['host_id'] for n in self.topology if n['region'] == target_region]
+                primary_incident['affected_hosts'] = region_hosts
                 primary_incident['affected_services'] = list(set(
                     n['service'] for n in self.topology if n['region'] == target_region
                 ))
@@ -305,22 +356,41 @@ class MELTGenerator:
             db_connections = max(0, min(100, db_connections))
             resource_pool_util = max(0, min(100, resource_pool_util))
 
-            metrics_batch.append({
+            # Get cloud provider for this node
+            cloud_provider_name = node.get('cloud_provider', 'onpremise')
+            provider = self.providers.get(cloud_provider_name)
+            if provider is None:
+                provider = list(self.providers.values())[0]
+            
+            # Format metric names using cloud provider
+            formatted_metrics = {
+                provider.format_metric_name('system.cpu.util'): round(cpu, 2),
+                provider.format_metric_name('system.mem.util'): round(mem, 2),
+                provider.format_metric_name('net.latency.ms'): round(latency, 2),
+                provider.format_metric_name('app.error_rate'): round(error_rate, 2),
+                provider.format_metric_name('app.request_count'): int(random.randint(100, 500) * seasonality * maintenance_multiplier),
+                provider.format_metric_name('net.packet_loss.pct'): round(packet_loss, 2),
+                provider.format_metric_name('db.connection_pool.util'): round(db_connections, 2),
+                provider.format_metric_name('resource.pool.util'): round(resource_pool_util, 2)
+            }
+            
+            # Build metric entry with cloud-specific metadata
+            metric_entry = {
                 "timestamp": timestamp.isoformat(),
                 "host_id": node['host_id'],
                 "service": node['service'],
                 "region": node['region'],
-                "metrics": {
-                    "system.cpu.util": round(cpu, 2),
-                    "system.mem.util": round(mem, 2),
-                    "net.latency.ms": round(latency, 2),
-                    "app.error_rate": round(error_rate, 2),
-                    "app.request_count": int(random.randint(100, 500) * seasonality * maintenance_multiplier),
-                    "net.packet_loss.pct": round(packet_loss, 2),
-                    "db.connection_pool.util": round(db_connections, 2),
-                    "resource.pool.util": round(resource_pool_util, 2)
-                }
-            })
+                "cloud_provider": cloud_provider_name,
+                "metrics": formatted_metrics
+            }
+            
+            # Add cloud-specific metadata fields
+            cloud_metadata = {k: v for k, v in node.items() 
+                            if k not in ['host_id', 'service', 'region', 'ip', 'cloud_provider']}
+            if cloud_metadata:
+                metric_entry["metadata"] = cloud_metadata
+            
+            metrics_batch.append(metric_entry)
         return metrics_batch
 
     def _generate_logs_and_traces(self, timestamp, active_incidents):
@@ -352,6 +422,9 @@ class MELTGenerator:
                     if ic_type == "DEPENDENCY_DEGRADATION":
                         duration = random.randint(1000, 3000)  # Upstream timeout
             
+            # Get cloud provider for this node
+            cloud_provider_name = node.get('cloud_provider', 'onpremise')
+            
             trace = {
                 "trace_id": trace_id,
                 "span_id": span_id,
@@ -360,11 +433,19 @@ class MELTGenerator:
                 "operation": "GET /api/v1/resource",
                 "duration_ms": duration,
                 "status_code": status_code,
+                "cloud_provider": cloud_provider_name,
+                "region": node['region'],
                 "attributes": {
                     "http.method": "GET",
                     "host.name": node['host_id']
                 }
             }
+            # Add cloud-specific metadata to attributes
+            cloud_metadata = {k: v for k, v in node.items() 
+                            if k not in ['host_id', 'service', 'region', 'ip', 'cloud_provider']}
+            if cloud_metadata:
+                trace["attributes"].update({f"cloud.{k}": v for k, v in cloud_metadata.items()})
+            
             traces_batch.append(trace)
 
             # --- LOGS ---
@@ -397,19 +478,29 @@ class MELTGenerator:
                 log_level = "WARNING"
                 msg = f"Performance degradation detected: {affecting_incident['type']}"
 
+            # Get cloud provider for this node
+            cloud_provider_name = node.get('cloud_provider', 'onpremise')
+
             log_entry = {
                 "timestamp": timestamp.isoformat(),
                 "level": log_level,
                 "service": node['service'],
                 "host": node['host_id'],
+                "cloud_provider": cloud_provider_name,
+                "region": node['region'],
                 "trace_id": trace_id,  # Correlated
                 "message": msg
             }
+            # Add cloud-specific metadata
+            cloud_metadata = {k: v for k, v in node.items() 
+                            if k not in ['host_id', 'service', 'region', 'ip', 'cloud_provider']}
+            if cloud_metadata:
+                log_entry["metadata"] = cloud_metadata
             logs_batch.append(log_entry)
 
         return logs_batch, traces_batch
 
-    def _generate_events(self, timestamp, active_incidents):
+    def _generate_events(self, timestamp, active_incidents, granularity_minutes):
         events_batch = []
         
         # Deployment Event (Random, less frequent but more realistic)
@@ -420,7 +511,7 @@ class MELTGenerator:
                 "timestamp": timestamp.isoformat(),
                 "type": "DEPLOYMENT",
                 "service": service,
-                "region": random.choice(REGIONS),
+                "region": random.choice(self.regions),
                 "version": version,
                 "deployment_id": str(uuid.uuid4()),
                 "status": random.choice(["SUCCESS", "SUCCESS", "SUCCESS", "ROLLBACK"]),  # 75% success rate
@@ -609,7 +700,7 @@ class MELTGenerator:
             time_to_end = (incident_end - timestamp).total_seconds() / 60
             
             # Primary incident start (use time window instead of exact match)
-            if 0 <= time_since_start < GRANULARITY_MINUTES and incident.get('is_primary', True):
+            if 0 <= time_since_start < granularity_minutes and incident.get('is_primary', True):
                 severity = incident['root_cause']['severity']
                 events_batch.append({
                     "timestamp": timestamp.isoformat(),
@@ -632,7 +723,7 @@ class MELTGenerator:
                 })
             
             # Cascading incident start
-            if 0 <= time_since_start < GRANULARITY_MINUTES and not incident.get('is_primary', True):
+            if 0 <= time_since_start < granularity_minutes and not incident.get('is_primary', True):
                 events_batch.append({
                     "timestamp": timestamp.isoformat(),
                     "type": "CASCADE_TRIGGER",
@@ -652,7 +743,7 @@ class MELTGenerator:
             
             # Incident updates during active incidents (every 30-60 minutes)
             if incident.get('is_primary', True) and time_since_start > 0 and time_to_end > 0:
-                if time_since_start % 30 < GRANULARITY_MINUTES:  # Update every ~30 minutes
+                if time_since_start % 30 < granularity_minutes:  # Update every ~30 minutes
                     update_type = random.choice(["ESCALATION", "UPDATE", "MITIGATION_ATTEMPT"])
                     events_batch.append({
                         "timestamp": timestamp.isoformat(),
@@ -672,7 +763,7 @@ class MELTGenerator:
                     })
             
             # Incident resolution (use time window)
-            if 0 <= time_to_end < GRANULARITY_MINUTES:
+            if 0 <= time_to_end < granularity_minutes:
                 resolution_time = (incident_end - incident_start).total_seconds() / 60
                 events_batch.append({
                     "timestamp": timestamp.isoformat(),
@@ -753,18 +844,26 @@ class MELTGenerator:
         return f"Incident {incident['type']} update"
 
     def run(self):
-        print(f"Starting generation for {DAYS_TO_GENERATE} days...")
-        print(f"Granularity: {GRANULARITY_MINUTES} minutes")
-        print(f"Total data points per day: {24 * 60 // GRANULARITY_MINUTES}")
+        enabled_clouds = self.cloud_config.get_enabled_clouds()
+        days_to_generate = self.cloud_config.days_to_generate
+        granularity_minutes = self.cloud_config.granularity_minutes
+        start_date = self.cloud_config.start_date
+        
+        print(f"Starting generation for {days_to_generate} days...")
+        print(f"Start date: {start_date.strftime('%Y-%m-%d')}")
+        print(f"Granularity: {granularity_minutes} minutes")
+        print(f"Total data points per day: {24 * 60 // granularity_minutes}")
+        print(f"Enabled clouds: {', '.join(enabled_clouds)}")
+        print(f"Total regions: {len(self.regions)}")
         print(f"Total hosts: {len(self.topology)}")
         print("-" * 60)
         
         ground_truth_catalog = []
-        total_intervals = DAYS_TO_GENERATE * (24 * 60 // GRANULARITY_MINUTES)
+        total_intervals = days_to_generate * (24 * 60 // granularity_minutes)
         processed_intervals = 0
 
-        for day_offset in range(DAYS_TO_GENERATE):
-            curr_date = START_DATE + timedelta(days=day_offset)
+        for day_offset in range(days_to_generate):
+            curr_date = start_date + timedelta(days=day_offset)
             date_str = curr_date.strftime("%Y-%m-%d")
             month_str = curr_date.strftime("%Y-%m")
             
@@ -782,10 +881,10 @@ class MELTGenerator:
             daily_traces = []
             daily_events = []
 
-            # Time Loop (15-minute steps)
-            intervals_per_day = 24 * 60 // GRANULARITY_MINUTES
+            # Time Loop (based on granularity)
+            intervals_per_day = 24 * 60 // granularity_minutes
             for interval in range(intervals_per_day):
-                curr_time = curr_date + timedelta(minutes=interval * GRANULARITY_MINUTES)
+                curr_time = curr_date + timedelta(minutes=interval * granularity_minutes)
                 
                 # Get all active incidents at this timestamp
                 active_incidents = self._get_active_incidents(curr_time, daily_incidents)
@@ -795,7 +894,7 @@ class MELTGenerator:
                 l, t = self._generate_logs_and_traces(curr_time, active_incidents)
                 daily_logs.extend(l)
                 daily_traces.extend(t)
-                daily_events.extend(self._generate_events(curr_time, active_incidents))
+                daily_events.extend(self._generate_events(curr_time, active_incidents, granularity_minutes))
                 
                 processed_intervals += 1
                 if processed_intervals % 100 == 0:
@@ -808,19 +907,19 @@ class MELTGenerator:
             self._save_file(daily_traces, 'traces', month_str, date_str)
             self._save_file(daily_events, 'events', month_str, date_str)
             
-            progress = ((day_offset + 1) / DAYS_TO_GENERATE) * 100
+            progress = ((day_offset + 1) / days_to_generate) * 100
             incident_count = len([i for i in daily_incidents if i.get('is_primary', True)])
             print(f"Completed {date_str} ({progress:.1f}%) - {incident_count} primary incident(s)")
 
         # Save Ground Truth with enhanced metadata
         ground_truth_enhanced = {
             "generation_config": {
-                "start_date": START_DATE.isoformat(),
-                "days_generated": DAYS_TO_GENERATE,
-                "granularity_minutes": GRANULARITY_MINUTES,
+                "start_date": start_date.isoformat(),
+                "days_generated": days_to_generate,
+                "granularity_minutes": granularity_minutes,
                 "total_hosts": len(self.topology),
                 "services": SERVICES,
-                "regions": REGIONS
+                "regions": self.regions
             },
             "incidents": ground_truth_catalog,
             "summary": {
@@ -946,7 +1045,67 @@ class MELTGenerator:
         with open(path, 'w') as f:
             json.dump(data, f, indent=None) # Compact JSON
 
+def parse_args():
+    """Parse command-line arguments."""
+    default_config_path = "config.json"
+    
+    parser = argparse.ArgumentParser(
+        description="Generate MELT (Metrics, Events, Logs, Traces) telemetry data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+Configuration:
+  All settings (clouds, start date, days to generate, granularity) are configured in config.json
+  
+Examples:
+  # Use default config.json
+  python generate_melt_data.py
+  
+  # Use custom config file
+  python generate_melt_data.py --config my_config.json
+        """
+    )
+    
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=default_config_path,
+        metavar="PATH",
+        help=f"Path to configuration file (default: {default_config_path})"
+    )
+    
+    return parser.parse_args()
+
+
 # Run Generator
 if __name__ == "__main__":
-    gen = MELTGenerator()
+    args = parse_args()
+    
+    # Load cloud configuration
+    cloud_config = CloudConfig(config_path=args.config)
+    
+    # Show configuration
+    config_source = args.config
+    enabled_clouds = cloud_config.get_enabled_clouds()
+    
+    print("=" * 60)
+    print("MELT Data Generator - Configuration")
+    print("=" * 60)
+    print(f"Configuration file: {config_source}")
+    print(f"Start date: {cloud_config.start_date.strftime('%Y-%m-%d')}")
+    print(f"Days to generate: {cloud_config.days_to_generate}")
+    print(f"Granularity: {cloud_config.granularity_minutes} minutes")
+    print(f"Enabled clouds: {', '.join(enabled_clouds) if enabled_clouds else 'none'}")
+    
+    # Check if at least one cloud is enabled
+    if not enabled_clouds:
+        print("\nError: No clouds are enabled. Please enable at least one cloud in config.json")
+        print(f"Supported clouds: {', '.join(CloudConfig.SUPPORTED_CLOUDS)}")
+        exit(1)
+    
+    print(f"Total regions: {len(cloud_config.get_all_regions())}")
+    print("=" * 60)
+    print()
+    
+    # Create generator with cloud configuration
+    gen = MELTGenerator(cloud_config=cloud_config)
     gen.run()

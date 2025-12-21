@@ -1,0 +1,37 @@
+{
+  "generation": {
+    "start_date": "2024-06-01",
+    "days_to_generate": 365,
+    "granularity_minutes": 15
+  },
+  "clouds": {
+    "aws": {
+      "enabled": true,
+      "regions": ["us-east-1", "eu-west-1"]
+    },
+    "azure": {
+      "enabled": true,
+      "regions": ["eastus", "westeurope"]
+    },
+    "gcp": {
+      "enabled": true,
+      "regions": ["us-east1", "europe-west1"]
+    },
+    "openstack": {
+      "enabled": true,
+      "regions": ["region-one", "region-two"]
+    },
+    "nutanix": {
+      "enabled": false,
+      "regions": ["cluster-1", "cluster-2"]
+    },
+    "vmware": {
+      "enabled": false,
+      "regions": ["datacenter-1", "datacenter-2"]
+    },
+    "onpremise": {
+      "enabled": true,
+      "regions": ["on-prem-dc1", "on-prem-dc2"]
+    }
+  }
+}
