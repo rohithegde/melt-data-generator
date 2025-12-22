@@ -4,7 +4,7 @@ A comprehensive data generator for creating realistic MELT (Metrics, Events, Log
 
 ## Features
 
-- **Full Year Generation**: Generates 365 days of telemetry data with 15-minute granularity
+- **Full Year Generation**: Generates 365 days of telemetry data with 15-minute granularity(configurable)
 - **Multiple Incident Types**:
   - Memory leaks
   - Database contention
@@ -24,7 +24,7 @@ A comprehensive data generator for creating realistic MELT (Metrics, Events, Log
 - **Multi-Service Support**: Service dependency graph with cascading incident propagation
 - **Enhanced Ground Truth**: Complete incident catalog with relationships and metadata
 
-## Installationg
+## Installation
 
 1. Ensure you have Python 3.8 or higher installed
 2. Install dependencies:
