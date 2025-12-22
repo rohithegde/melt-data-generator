@@ -3,6 +3,7 @@ import json
 import uuid
 import random
 import argparse
+import shutil
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -80,6 +81,12 @@ class MELTGenerator:
         return mapping
 
     def _prepare_directories(self):
+        # Delete existing melt_data folder if it exists
+        if os.path.exists(BASE_DIR):
+            shutil.rmtree(BASE_DIR)
+            print(f"Deleted existing {BASE_DIR} folder")
+        
+        # Create fresh directory structure
         for dtype in ['metrics', 'events', 'logs', 'traces', 'metadata']:
             os.makedirs(os.path.join(BASE_DIR, dtype), exist_ok=True)
 
