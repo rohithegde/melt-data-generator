@@ -281,76 +281,109 @@ class MELTGenerator:
             # Check if this host is affected by any incident
             affecting_incident = self._is_host_affected(node['host_id'], active_incidents)
             
+            # Also check if service is affected (for dependency degradation scenarios)
+            if not affecting_incident:
+                for incident in active_incidents:
+                    if node['service'] in incident.get('affected_services', []):
+                        affecting_incident = incident
+                        break
+            
             if affecting_incident:
                 ic_type = affecting_incident['type']
                 elapsed = (timestamp - affecting_incident['start_time']).total_seconds() / 3600
                 time_to_end = (affecting_incident['end_time'] - timestamp).total_seconds() / 3600
                 
-                # Partial outage: only some hosts fail
-                if random.random() < 0.7:  # 70% of hosts affected
-                    if ic_type == "MEMORY_LEAK":
-                        # Gradual degradation
+                # Apply incident effects - all affected hosts should show signs
+                # Use deterministic approach based on host_id to ensure consistency
+                host_hash = hash(node['host_id']) % 100
+                is_affected = host_hash < 85  # 85% of hosts show strong effects, 15% show mild effects
+                
+                if ic_type == "MEMORY_LEAK":
+                    # Gradual degradation - all affected hosts show this
+                    if is_affected:
                         mem += (20 * elapsed)
                         latency += (10 * elapsed)
                         if mem > 90:
                             error_rate = 5.0
                             cpu += 20  # GC overhead
+                    else:
+                        # Mild effects for remaining hosts
+                        mem += (10 * elapsed)
+                        latency += (5 * elapsed)
 
-                    elif ic_type == "DB_CONTENTION":
+                elif ic_type == "DB_CONTENTION":
+                    if is_affected:
                         latency *= 5
                         error_rate = 2.0
                         db_connections = min(100, db_connections * 3)
-                        if node['service'] == "inventory-db":
-                            cpu += 30
+                    else:
+                        latency *= 2.5
+                        error_rate = 1.0
+                    if node['service'] == "inventory-db":
+                        cpu += 30
 
-                    elif ic_type == "CPU_SATURATION":
+                elif ic_type == "CPU_SATURATION":
+                    if is_affected:
                         cpu = 95 + random.random() * 5
                         latency += 50
-                        if cpu > 98:
-                            error_rate = 3.0
+                    else:
+                        cpu = 85 + random.random() * 5
+                        latency += 25
+                    if cpu > 98:
+                        error_rate = 3.0
 
-                    elif ic_type == "NETWORK_PACKET_LOSS":
+                elif ic_type == "NETWORK_PACKET_LOSS":
+                    if is_affected:
                         packet_loss = random.gauss(15, 5)
-                        latency += packet_loss * 10
-                        error_rate = packet_loss / 10
+                    else:
+                        packet_loss = random.gauss(7, 3)
+                    latency += packet_loss * 10
+                    error_rate = packet_loss / 10
 
-                    elif ic_type == "NETWORK_PARTITION":
-                        # Regional network issue (host already identified as affected)
-                        packet_loss = random.gauss(50, 10)
-                        latency *= 10
-                        error_rate = 10.0
-                        cpu += 20  # Retry overhead
+                elif ic_type == "NETWORK_PARTITION":
+                    # Regional network issue - all hosts in region affected
+                    packet_loss = random.gauss(50, 10)
+                    latency *= 10
+                    error_rate = 10.0
+                    cpu += 20  # Retry overhead
 
-                    elif ic_type == "DEPENDENCY_DEGRADATION":
-                        # Upstream service is slow
+                elif ic_type == "DEPENDENCY_DEGRADATION":
+                    # Upstream service is slow - affects all dependent services
+                    if is_affected:
                         latency += random.gauss(200, 50)
                         error_rate = 1.5
-                        if latency > 500:
-                            error_rate = 5.0  # Timeout errors
+                    else:
+                        latency += random.gauss(100, 25)
+                        error_rate = 0.8
+                    if latency > 500:
+                        error_rate = 5.0  # Timeout errors
 
-                    elif ic_type == "CASCADING_FAILURE":
-                        # Multiple services failing
-                        cpu += 40
-                        latency += 100
-                        error_rate = 4.0
-                        mem += 20
+                elif ic_type == "CASCADING_FAILURE":
+                    # Multiple services failing
+                    cpu += 40
+                    latency += 100
+                    error_rate = 4.0
+                    mem += 20
 
-                    elif ic_type == "CONFIG_MISMATCH":
-                        # Intermittent failures
-                        if random.random() < 0.3:  # 30% of requests fail
-                            error_rate = 3.0
-                            latency += 100
-
-                    elif ic_type == "RESOURCE_EXHAUSTION":
-                        # Shared resource pool exhausted
-                        resource_pool_util = 95 + random.random() * 5
-                        latency += 150
+                elif ic_type == "CONFIG_MISMATCH":
+                    # Intermittent failures
+                    if is_affected and random.random() < 0.3:  # 30% of requests fail
                         error_rate = 3.0
-                        if resource_pool_util > 98:
-                            error_rate = 8.0
+                        latency += 100
+                    elif not is_affected and random.random() < 0.1:
+                        error_rate = 1.0
+                        latency += 50
+
+                elif ic_type == "RESOURCE_EXHAUSTION":
+                    # Shared resource pool exhausted
+                    resource_pool_util = 95 + random.random() * 5
+                    latency += 150
+                    error_rate = 3.0
+                    if resource_pool_util > 98:
+                        error_rate = 8.0
                 
-                # Recovery pattern: gradual recovery near end
-                if time_to_end < 0.5:  # Last 30 minutes
+                # Recovery pattern: gradual recovery near end (only if host was affected)
+                if is_affected and time_to_end < 0.5:  # Last 30 minutes
                     recovery_factor = time_to_end / 0.5
                     error_rate *= recovery_factor
                     latency *= (0.5 + 0.5 * recovery_factor)
@@ -391,6 +424,11 @@ class MELTGenerator:
                 "metrics": formatted_metrics
             }
             
+            # Add incident information if host/service is affected
+            if affecting_incident:
+                metric_entry["incident_id"] = affecting_incident['id']
+                metric_entry["incident_type"] = affecting_incident['type']
+            
             # Add cloud-specific metadata fields
             cloud_metadata = {k: v for k, v in node.items() 
                             if k not in ['host_id', 'service', 'region', 'ip', 'cloud_provider']}
@@ -407,6 +445,13 @@ class MELTGenerator:
         for node in self.topology:
             # Check if this host is affected by any incident
             affecting_incident = self._is_host_affected(node['host_id'], active_incidents)
+            
+            # Also check if service is affected (for dependency degradation scenarios)
+            if not affecting_incident:
+                for incident in active_incidents:
+                    if node['service'] in incident.get('affected_services', []):
+                        affecting_incident = incident
+                        break
             
             # --- TRACES ---
             trace_id = uuid.uuid4().hex
@@ -447,6 +492,12 @@ class MELTGenerator:
                     "host.name": node['host_id']
                 }
             }
+            
+            # Add incident information if host/service is affected
+            if affecting_incident:
+                trace["incident_id"] = affecting_incident['id']
+                trace["incident_type"] = affecting_incident['type']
+            
             # Add cloud-specific metadata to attributes
             cloud_metadata = {k: v for k, v in node.items() 
                             if k not in ['host_id', 'service', 'region', 'ip', 'cloud_provider']}
@@ -498,6 +549,12 @@ class MELTGenerator:
                 "trace_id": trace_id,  # Correlated
                 "message": msg
             }
+            
+            # Add incident information if host/service is affected
+            if affecting_incident:
+                log_entry["incident_id"] = affecting_incident['id']
+                log_entry["incident_type"] = affecting_incident['type']
+            
             # Add cloud-specific metadata
             cloud_metadata = {k: v for k, v in node.items() 
                             if k not in ['host_id', 'service', 'region', 'ip', 'cloud_provider']}
